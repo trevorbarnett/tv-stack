@@ -1,6 +1,24 @@
 # TV Stack
 
-Automated media server stack running in Docker (WSL2 or Linux). VPN-protected torrenting with automated movie, TV, and music management.
+A self-hosted, fully automated media stack. You request something — it finds, downloads, organizes, and makes it available to stream. Everything routes through a VPN kill switch so your torrent traffic is always protected.
+
+## What You Get
+
+**Automated acquisition** — Sonarr (TV), Radarr (movies), and Lidarr (music) monitor RSS feeds and indexers. When a new episode airs or a release you've been waiting for drops, it's downloaded automatically without any manual intervention.
+
+**VPN kill switch** — qBittorrent and all indexer traffic route through Gluetun. If the VPN drops, traffic stops — it never falls back to your real IP. OpenVPN over TCP (port 443) is used for WSL2 compatibility; WireGuard is blocked at the Windows virtual switch level.
+
+**Centralized indexer management** — Prowlarr manages all your indexers in one place and syncs them to Sonarr, Radarr, and Lidarr automatically. Add an indexer once, not three times.
+
+**Subtitle automation** — Bazarr watches your library and fetches matching subtitles automatically via OpenSubtitles.
+
+**Request UI** — Seerr gives you (and anyone you share it with) a Netflix-style interface to browse and request media. Requests flow directly to Sonarr/Radarr for automated downloading.
+
+**Hard links** — Downloaded files are hard-linked (not copied) into your media library. Seeding and streaming happen simultaneously with no wasted disk space and instant "moves."
+
+**Remote access** — Tailscale exposes every service on a private WireGuard mesh. Access your stack from your phone, laptop, or anywhere else without port forwarding or exposing anything to the public internet.
+
+**Dashboard** — Homepage gives you a live overview of all services, now-playing status, and quick links.
 
 ## Services
 
