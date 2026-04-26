@@ -1,0 +1,21 @@
+# Actual env file with credentials
+.env
+
+# Claude Code context (contains personal info — never commit)
+CLAUDE.md
+.claude/
+
+# Homepage config (contains API keys after setup)
+homepage/
+
+# Container config directories (generated at runtime)
+gluetun/
+qbittorrent/
+prowlarr/
+radarr/
+sonarr/
+lidarr/
+bazarr/
+jellyfin/
+seerr/
+tailscale/
