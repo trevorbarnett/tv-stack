@@ -155,6 +155,30 @@ services:
     restart: unless-stopped
 
   # ============================================================
+  # SABNZBD — Usenet Download Client
+  # Connects to Eweka over SSL (port 563). No VPN needed —
+  # Usenet uses encrypted NNTP and isn't tracked like torrents.
+  # WebUI at localhost:8090
+  # ============================================================
+  sabnzbd:
+    image: lscr.io/linuxserver/sabnzbd:latest
+    container_name: sabnzbd
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - UMASK=002
+      - TZ=${TZ}
+    volumes:
+      - ./sabnzbd:/config
+      - ${MEDIA_BASE:-/mnt/e/Media}:/data
+    ports:
+      - 8090:8080
+    networks:
+      tvnetwork:
+        ipv4_address: ${IP_SABNZBD}
+    restart: unless-stopped
+
+  # ============================================================
   # RADARR — Movie Manager
   # Root folder: /data/Movies = $MEDIA_BASE/Movies
   # Download client category: movies → /data/Downloads/movies
