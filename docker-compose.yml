@@ -297,6 +297,28 @@ services:
     restart: unless-stopped
 
   # ============================================================
+  # TAUTULLI — Plex Usage Analytics
+  # Connects to Plex (Windows service) via 172.28.32.1:32400 (Windows host IP in WSL2).
+  # host.docker.internal does not resolve in this setup — use the IP directly.
+  # Sign in through the browser on first run — no manual token needed.
+  # ============================================================
+  tautulli:
+    image: lscr.io/linuxserver/tautulli:latest
+    container_name: tautulli
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ./tautulli:/config
+    ports:
+      - 8181:8181
+    networks:
+      tvnetwork:
+        ipv4_address: ${IP_TAUTULLI}
+    restart: unless-stopped
+
+  # ============================================================
   # HOMEPAGE — System Dashboard
   # Health overview, service links, and live stats for all services.
   # Config lives in ./homepage/ — fill in API keys after first run.
