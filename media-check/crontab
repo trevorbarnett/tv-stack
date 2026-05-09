@@ -1,0 +1,1 @@
+0 3 * * * cd /app && python check.py 2>&1

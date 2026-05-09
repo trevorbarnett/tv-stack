@@ -297,6 +297,32 @@ services:
     restart: unless-stopped
 
   # ============================================================
+  # MEDIA-CHECK — Corruption & Language Scanner
+  # Scans TV/movie files nightly (3 AM) via ffprobe. Notifies Discord
+  # when files are corrupt, missing expected audio, or missing subtitles.
+  # Requires RADARR_API_KEY and DISCORD_WEBHOOK in .env.
+  # Manual run: docker exec media-check python check.py
+  # ============================================================
+  media-check:
+    build: ./media-check
+    container_name: media-check
+    environment:
+      - SONARR_URL=http://172.39.0.4:8989
+      - SONARR_API_KEY=${SONARR_API_KEY}
+      - RADARR_URL=http://172.39.0.3:7878
+      - RADARR_API_KEY=${RADARR_API_KEY}
+      - DISCORD_WEBHOOK=${DISCORD_WEBHOOK}
+      - RECHECK_DAYS=${RECHECK_DAYS:-7}
+      - TZ=${TZ}
+    volumes:
+      - ${MEDIA_BASE:-/mnt/e/Media}:/data:ro
+      - ./media-check/data:/app/data
+    networks:
+      tvnetwork:
+        ipv4_address: ${IP_MEDIA_CHECK}
+    restart: unless-stopped
+
+  # ============================================================
   # TAUTULLI — Plex Usage Analytics
   # Connects to Plex (Windows service) via 172.28.32.1:32400 (Windows host IP in WSL2).
   # host.docker.internal does not resolve in this setup — use the IP directly.
