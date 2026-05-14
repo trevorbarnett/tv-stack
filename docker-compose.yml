@@ -345,6 +345,27 @@ services:
     restart: unless-stopped
 
   # ============================================================
+  # WATCHTOWER — Automatic Image Updater
+  # Checks for new image versions weekly (Mondays at 4am) and restarts
+  # containers with updated images. Notifies Discord on updates.
+  # media-check (local build) and pinned-tag images (seerr v3.0.1) are skipped.
+  # ============================================================
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    environment:
+      - TZ=${TZ}
+      - WATCHTOWER_SCHEDULE=0 0 4 * * 1
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_NOTIFICATION_URL=${WATCHTOWER_NOTIFICATION_URL}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      tvnetwork:
+        ipv4_address: ${IP_WATCHTOWER}
+    restart: unless-stopped
+
+  # ============================================================
   # HOMEPAGE — System Dashboard
   # Health overview, service links, and live stats for all services.
   # Config lives in ./homepage/ — fill in API keys after first run.
