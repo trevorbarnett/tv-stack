@@ -22,6 +22,14 @@ A self-hosted, fully automated media stack. You request something — it finds, 
 
 **Dashboard** — Homepage gives you a live overview of all services, now-playing status, and quick links.
 
+**Health monitoring** — `health-monitor.sh` runs every 5 minutes via cron and sends Discord alerts whenever a container goes down or recovers. A daily summary is sent at midnight regardless of state changes.
+
+**Usage analytics** — Tautulli tracks what's being watched on Plex, who's watching it, and when.
+
+**Media integrity** — `media-check` runs nightly via ffprobe to detect corrupted files and wrong audio/subtitle tracks, alerting to Discord on issues.
+
+**Automatic updates** — Watchtower checks for new Docker image versions weekly (Monday 4am) and restarts containers with updates. Notifies Discord on any changes.
+
 ## Services
 
 | Service | Port | Purpose |
@@ -35,8 +43,11 @@ A self-hosted, fully automated media stack. You request something — it finds, 
 | Lidarr | 8686 | Music automation |
 | Bazarr | 6767 | Subtitle automation |
 | Seerr | 5055 | Request UI (Netflix-like) |
+| Tautulli | 8181 | Plex usage analytics |
 | Homepage | 3000 | Dashboard |
 | Tailscale | — | Remote access VPN |
+| Watchtower | — | Automatic image updater |
+| media-check | — | Nightly corruption & language scanner |
 
 > **Plex** runs as a Windows service (not in Docker). Add it to your Tailscale network separately.
 
@@ -83,6 +94,9 @@ Fill in:
 - **`PUID` / `PGID`** — your user/group ID (`id` in terminal to find them)
 - **`OPENVPN_USER` / `OPENVPN_PASSWORD`** — Surfshark service credentials from [my.surfshark.com → VPN → Manual Setup → OpenVPN tab](https://my.surfshark.com/vpn/manual-setup/main). These are NOT your Surfshark login.
 - **`TS_AUTHKEY`** — Tailscale auth key from [login.tailscale.com/admin/settings/keys](https://login.tailscale.com/admin/settings/keys)
+- **`DISCORD_WEBHOOK`** — webhook URL for health alerts and media-check notifications (Discord → channel → Integrations → Webhooks → New Webhook → Copy URL). Format: `https://discord.com/api/webhooks/CHANNEL_ID/TOKEN`
+- **`WATCHTOWER_NOTIFICATION_URL`** — same webhook in Shoutrrr format for Watchtower: `discord://TOKEN@CHANNEL_ID` (token and channel ID from your webhook URL, just swapped)
+- **`RADARR_API_KEY`** — Radarr → Settings → General → API Key (fill in after Radarr is running; used by media-check)
 
 ### 2. Create media folders
 
@@ -205,6 +219,13 @@ API key is in **Config → General** — needed when wiring up Radarr/Sonarr/Lid
 
 > **Re-triggering searches after adding Usenet indexers:** Go to Radarr → Wanted → Missing → Search All, and Sonarr → Wanted → Missing → Search Selected. To force indexer sync first: Settings → Apps → Sync App Indexers.
 
+### Tautulli (http://localhost:8181)
+
+Plex usage analytics — tracks what's being watched and by whom.
+
+1. Open `http://localhost:8181` and sign in with your Plex account via OAuth
+2. When prompted for a Plex Media Server, enter `172.28.32.1` as the host and `32400` as the port (`host.docker.internal` does not resolve inside WSL2 Docker containers)
+
 ### Bazarr (http://localhost:6767)
 
 1. **Settings → Radarr** — Host `172.39.0.3`, port `7878`, API key from Radarr
@@ -216,6 +237,33 @@ API key is in **Config → General** — needed when wiring up Radarr/Sonarr/Lid
 1. Connect to Plex on first-run wizard (use `host.docker.internal:32400` if Plex is on the same Windows machine)
 2. **Settings → Radarr** — Host `172.39.0.3`, port `7878`
 3. **Settings → Sonarr** — Host `172.39.0.4`, port `8989`
+
+---
+
+## Health Monitoring
+
+`health-monitor.sh` watches every container and sends Discord alerts when state changes:
+
+- **Container down** — immediate red alert with container name and status
+- **Container recovered** — green alert when it comes back up
+- **Daily summary** — midnight digest of all container states, green if all healthy, yellow if anything is down
+
+**Setup (one time):**
+
+```bash
+# Make the script executable
+chmod +x health-monitor.sh
+
+# Add cron job (runs every 5 minutes)
+(crontab -l 2>/dev/null; echo "*/5 * * * * /home/tbarnett/projects/tv/health-monitor.sh >> /tmp/docker-health-monitor.log 2>&1") | crontab -
+
+# Test it
+bash health-monitor.sh
+```
+
+State is tracked in `/tmp/docker-health-state/` between runs. Alerts only fire on transitions (no repeated spam). Logs go to `/tmp/docker-health-monitor.log`.
+
+> Requires `DISCORD_WEBHOOK` to be set in `.env`.
 
 ---
 
