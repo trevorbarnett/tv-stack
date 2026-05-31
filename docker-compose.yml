@@ -409,5 +409,31 @@ services:
     network_mode: host
     restart: unless-stopped
 
+  # ============================================================
+  # DISCORD-BOT — Stack Control via Discord
+  # Listens for !commands in a designated channel and runs docker
+  # compose operations. Requires a Discord bot token.
+  # Setup: discord.com/developers/applications → New Application →
+  #   Bot → enable "Message Content" intent → copy token.
+  # Invite URL: OAuth2 → URL Generator → bot scope + Send Messages,
+  #   Read Message History, Add Reactions permissions.
+  # ============================================================
+  discord-bot:
+    build: ./discord-bot
+    container_name: discord-bot
+    environment:
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
+      - DISCORD_CONTROL_CHANNEL=${DISCORD_CONTROL_CHANNEL}
+      - DISCORD_ALLOWED_USER_ID=${DISCORD_ALLOWED_USER_ID:-0}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /usr/bin/docker:/usr/bin/docker:ro
+      - /usr/libexec/docker/cli-plugins/docker-compose:/usr/libexec/docker/cli-plugins/docker-compose:ro
+      - ./:/compose:ro
+    networks:
+      tvnetwork:
+        ipv4_address: 172.39.0.15
+    restart: unless-stopped
+
 volumes:
   seerr_config:

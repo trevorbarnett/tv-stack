@@ -240,6 +240,42 @@ Plex usage analytics — tracks what's being watched and by whom.
 
 ---
 
+## Discord Control Bot
+
+The `discord-bot` service lets you manage the stack from any Discord channel — useful when you're away from your desk.
+
+**Available commands:**
+
+| Command | What it does |
+|---------|-------------|
+| `!status` | Show all container states with 🟢/🟡/🔴 indicators |
+| `!restart <service>` | Restart a specific container |
+| `!restart all` | Restart every container *(asks for ✅ confirmation)* |
+| `!up` | `docker compose up -d` — start/recreate all containers |
+| `!down` | `docker compose down` — stop + remove all *(asks for ✅ confirmation)* |
+| `!logs <service>` | Last 30 lines of logs for any container |
+| `!services` | List all valid service names |
+
+**One-time Discord setup:**
+
+1. Go to [discord.com/developers/applications](https://discord.com/developers/applications) → **New Application**
+2. **Bot** tab → **Add Bot** → copy the token into `DISCORD_BOT_TOKEN` in `.env`
+3. **Bot** tab → scroll to **Privileged Gateway Intents** → enable **Message Content Intent**
+4. **OAuth2 → URL Generator** → scopes: `bot` → permissions: `Send Messages`, `Read Message History`, `Add Reactions` → open the generated URL to invite the bot to your server
+5. Right-click the channel you want to use → **Copy Channel ID** → set `DISCORD_CONTROL_CHANNEL` in `.env`
+   *(If "Copy Channel ID" is missing: User Settings → Advanced → enable Developer Mode)*
+6. Optional: right-click yourself → **Copy User ID** → set `DISCORD_ALLOWED_USER_ID` to restrict commands to your account only
+
+**Start the bot:**
+
+```bash
+docker compose up -d --build discord-bot
+```
+
+> ⚠️ `!down` followed by `!up` is a full stack reset. Confirmation is required for both. After `!down`, containers are removed — `!up` recreates them from the compose file.
+
+---
+
 ## Health Monitoring
 
 `health-monitor.sh` watches every container and sends Discord alerts when state changes:
