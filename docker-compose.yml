@@ -323,9 +323,25 @@ services:
     restart: unless-stopped
 
   # ============================================================
+  # PLEX PROXY — Stable socat bridge for Tautulli → Plex
+  # WSL2 assigns a new IP to the Windows host on every reboot, so a hardcoded
+  # address in Tautulli's config breaks after each restart. This service runs
+  # with network_mode: host so it can see WSL2's routing table, detects the
+  # current Windows host IP at startup, and forwards 172.39.0.1:32400 to it.
+  # 172.39.0.1 (the Docker bridge gateway) is stable across all reboots.
+  # ============================================================
+  plex-proxy:
+    build: ./plex-proxy
+    container_name: plex-proxy
+    network_mode: host
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+    restart: unless-stopped
+
+  # ============================================================
   # TAUTULLI — Plex Usage Analytics
-  # Connects to Plex (Windows service) via 172.28.32.1:32400 (Windows host IP in WSL2).
-  # host.docker.internal does not resolve in this setup — use the IP directly.
+  # Connects to Plex via plex-proxy at 172.39.0.1:32400 (stable Docker bridge).
+  # The custom-cont-init.d script sets pms_ip to 172.39.0.1 at every startup.
   # Sign in through the browser on first run — no manual token needed.
   # ============================================================
   tautulli:
@@ -337,11 +353,14 @@ services:
       - TZ=${TZ}
     volumes:
       - ./tautulli:/config
+      - ./tautulli-init:/custom-cont-init.d
     ports:
       - 8181:8181
     networks:
       tvnetwork:
         ipv4_address: ${IP_TAUTULLI}
+    depends_on:
+      - plex-proxy
     restart: unless-stopped
 
   # ============================================================
