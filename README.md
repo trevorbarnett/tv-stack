@@ -16,7 +16,9 @@ A self-hosted, fully automated media stack. You request something — it finds, 
 
 **Request UI** — Seerr gives you (and anyone you share it with) a Netflix-style interface to browse and request media. Requests flow directly to Sonarr/Radarr for automated downloading.
 
-**Hard links** — Downloaded files are hard-linked (not copied) into your media library. Seeding and streaming happen simultaneously with no wasted disk space and instant "moves."
+**Hard links** — Downloaded files are hard-linked (not copied) into your media library. Seeding and streaming happen simultaneously with no wasted disk space and instant "moves." (Hard links apply at the final import step — library to library — not for moves off the scratch SSD.)
+
+**Download cache SSD** — Active torrent pieces and Usenet unpack work happen on a dedicated ext4 SSD (`/mnt/dlcache`) passed through directly to WSL2. This keeps heavy random I/O off the NTFS HDD array, which is slow for small writes over the 9p bridge.
 
 **Remote access** — Tailscale exposes every service on a private WireGuard mesh. Access your stack from your phone, laptop, or anywhere else without port forwarding or exposing anything to the public internet.
 
@@ -160,11 +162,12 @@ Use these **internal Docker IPs** when wiring services together — never use `l
 Get the temporary password: `docker logs qbittorrent 2>&1 | grep "temporary password"`
 
 1. **Settings → Downloads** — Default save path: `/data/Downloads`
-2. **Settings → Downloads → Categories** — Add three categories:
+2. **Settings → Downloads** — Enable "Keep incomplete torrents in:" and set to `/dlcache/incomplete`
+3. **Settings → Downloads → Categories** — Add three categories:
    - `movies` → `/data/Downloads/movies`
    - `tv` → `/data/Downloads/tv`
    - `music` → `/data/Downloads/music`
-3. **Settings → BitTorrent → Seeding Limits** — Set ratio limit to `1.0`, time limit to `1440` min (24h), action: Pause torrent
+4. **Settings → BitTorrent → Seeding Limits** — Set ratio limit to `1.0`, time limit to `1440` min (24h), action: Pause torrent
 
 ### SABnzbd (http://localhost:8090)
 
@@ -176,7 +179,7 @@ Usenet download client. Connects to Eweka over SSL — no VPN needed.
    - Connections: `30` (Eweka's maximum)
    - Click **Test Server** — should return green
 2. **Config → Folders**
-   - Temporary Download Folder: `/data/Downloads/usenet/incomplete`
+   - Temporary Download Folder: `/dlcache/sabnzbd`
    - Completed Download Folder: `/data/Downloads/usenet/complete`
 
 API key is in **Config → General** — needed when wiring up Radarr/Sonarr/Lidarr.
@@ -237,6 +240,35 @@ Plex usage analytics — tracks what's being watched and by whom.
 1. Connect to Plex on first-run wizard (use `host.docker.internal:32400` if Plex is on the same Windows machine)
 2. **Settings → Radarr** — Host `172.39.0.3`, port `7878`
 3. **Settings → Sonarr** — Host `172.39.0.4`, port `8989`
+
+---
+
+## DL Cache — Scratch SSD
+
+Active download I/O (torrent pieces, par2 verification, archive extraction) runs on a dedicated Samsung SSD 850 EVO 1TB, passed through to WSL2 as a native ext4 volume at `/mnt/dlcache`. This avoids the NTFS-over-9p performance penalty for small random writes on the HDD array.
+
+**What lives here:** incomplete/in-progress downloads only. Once complete, files move to the HDD (`/data/Downloads/...`) as a normal copy, then get hard-linked into the library by the \*arrs.
+
+**What doesn't live here:** long-term storage. Treat it as disposable scratch — nothing here is backed up.
+
+**Why it's invisible in Windows Explorer:** raw disk passthrough (`wsl --mount --bare` + ext4). No drive letter — by design.
+
+### Recovery after Windows reboot
+
+A scheduled task (`MountDLCache`) reattaches the disk at logon automatically. If it fails or the mount doesn't come back:
+
+```powershell
+# Elevated PowerShell
+Set-Disk -Number 3 -IsOffline $true
+wsl --mount \\.\PHYSICALDRIVE3 --bare
+```
+
+```bash
+# WSL — fstab handles this automatically if the disk is attached, but if not:
+sudo mount -a
+```
+
+> Verify the disk number first with `Get-Disk` — PHYSICALDRIVE numbers can shift after Windows updates. Look for "Samsung SSD 850 EVO 1TB", Bus Type: SATA.
 
 ---
 

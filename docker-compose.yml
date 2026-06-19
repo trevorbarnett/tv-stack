@@ -74,6 +74,8 @@ services:
   # QBITTORRENT — Torrent Client (VPN protected)
   # Downloads to /data/Downloads inside the container
   # = $MEDIA_BASE/Downloads on the host
+  # Incomplete/active torrent I/O goes to /dlcache (ext4 SSD passthrough).
+  # Set Options → Downloads → "Keep incomplete torrents in: /dlcache/incomplete"
   # ============================================================
   qbittorrent:
     image: lscr.io/linuxserver/qbittorrent:latest
@@ -95,6 +97,7 @@ services:
     volumes:
       - ./qbittorrent:/config
       - ${MEDIA_BASE:-/mnt/e/Media}:/data
+      - /mnt/dlcache:/dlcache
     healthcheck:
       test: wget -q --spider http://localhost:8080 || exit 1
       interval: 60s
@@ -159,6 +162,8 @@ services:
   # Connects to Eweka over SSL (port 563). No VPN needed —
   # Usenet uses encrypted NNTP and isn't tracked like torrents.
   # WebUI at localhost:8090
+  # Temp/incomplete NZB I/O goes to /dlcache (ext4 SSD passthrough).
+  # Set Config → Folders → "Temporary Download Folder: /dlcache/sabnzbd"
   # ============================================================
   sabnzbd:
     image: lscr.io/linuxserver/sabnzbd:latest
@@ -171,6 +176,7 @@ services:
     volumes:
       - ./sabnzbd:/config
       - ${MEDIA_BASE:-/mnt/e/Media}:/data
+      - /mnt/dlcache:/dlcache
     ports:
       - 8090:8080
     networks:
