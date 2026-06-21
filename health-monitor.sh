@@ -1,5 +1,6 @@
 #!/bin/bash
-# Docker Compose health monitor — sends Discord alerts on container state changes.
+# Docker Compose health monitor — sends Discord alerts on container state changes,
+# plus gluetun DNS health and Sonarr/Radarr indexer backoff state.
 # Runs every 5 minutes via cron. Only notifies on transitions (up→down, down→up)
 # to avoid spam. State is persisted in /tmp/docker-health-state/.
 
@@ -59,6 +60,7 @@ done < <(docker ps -a --format "{{.Names}} {{.Status}}" 2>/dev/null)
 
 alerts_down=()
 alerts_recovered=()
+alerts_healed=()
 
 for svc in "${EXPECTED[@]}"; do
   state_file="$STATE_DIR/$svc"
@@ -113,6 +115,139 @@ while IFS= read -r line; do
   fi
 done < <(docker ps --format "{{.Names}}" 2>/dev/null)
 
+# Gluetun DNS check — catches VPN tunnels that report "healthy" via Docker's
+# healthcheck but have a broken internal DNS resolver (silent failure mode
+# that doesn't show up as a container state change).
+#
+# Auto-remediation: `docker restart gluetun` followed by restarting the
+# containers that share its network namespace (prowlarr/qbittorrent/
+# flaresolverr). Verified this is required and sufficient: restarting gluetun
+# alone gives it a *new* network namespace inode even though the container ID
+# is unchanged, which silently orphans the dependents until they're restarted
+# too. This is non-destructive (no config wipe, no recreate) — only escalate
+# to the heavier `docker compose down gluetun && rm -rf gluetun/` fix manually
+# if this doesn't clear it.
+dns_state_file="$STATE_DIR/gluetun_dns"
+dns_restart_cooldown_file="$STATE_DIR/gluetun_dns_restart_at"
+prev_dns_ok="true"
+if [[ -f "$dns_state_file" ]]; then
+  prev_dns_ok=$(cat "$dns_state_file")
+fi
+
+check_gluetun_dns() {
+  timeout 5 docker exec gluetun nslookup -timeout=3 google.com >/dev/null 2>&1
+}
+
+dns_ok="false"
+dns_auto_healed="false"
+if docker ps --format "{{.Names}}" 2>/dev/null | grep -qx "gluetun"; then
+  if check_gluetun_dns; then
+    dns_ok="true"
+  else
+    # Only attempt an auto-restart once every 15 minutes, so a persistently
+    # broken VPN (bad creds, provider outage) doesn't restart-loop forever.
+    last_restart=0
+    if [[ -f "$dns_restart_cooldown_file" ]]; then
+      last_restart=$(cat "$dns_restart_cooldown_file")
+    fi
+    now=$(date +%s)
+    if (( now - last_restart > 900 )); then
+      echo "$now" > "$dns_restart_cooldown_file"
+      docker restart gluetun >/dev/null 2>&1 || true
+      for _ in $(seq 1 12); do
+        sleep 5
+        h=$(docker inspect --format '{{.State.Health.Status}}' gluetun 2>/dev/null || true)
+        if [[ "$h" == "healthy" ]]; then
+          break
+        fi
+      done
+      docker restart prowlarr qbittorrent flaresolverr >/dev/null 2>&1 || true
+      sleep 5
+      if check_gluetun_dns; then
+        dns_ok="true"
+        dns_auto_healed="true"
+      fi
+    fi
+  fi
+else
+  dns_ok="true"  # container not running — already covered by the down alert above
+fi
+
+if [[ "$dns_auto_healed" == "true" ]]; then
+  alerts_healed+=("**gluetun** — DNS resolver was broken; auto-restarted gluetun + dependents (prowlarr/qbittorrent/flaresolverr) and it recovered")
+fi
+
+if [[ "$dns_ok" == "false" && "$prev_dns_ok" == "true" ]]; then
+  alerts_down+=("**gluetun** — VPN tunnel up but DNS resolution inside the container is broken (auto-restart attempted, did not clear it — see CLAUDE.md VPN reset steps)")
+  echo "false" > "$dns_state_file"
+elif [[ "$dns_ok" == "true" && "$prev_dns_ok" == "false" && "$dns_auto_healed" == "false" ]]; then
+  alerts_recovered+=("**gluetun** — DNS resolution restored")
+  echo "true" > "$dns_state_file"
+else
+  echo "$dns_ok" > "$dns_state_file"
+fi
+
+# *arr indexer backoff check — Sonarr/Radarr persist a long-term failure
+# backoff per indexer that survives a plain restart (cleared only via
+# /api/v3/indexer/testall). A VPN/network blip can leave indexers stuck
+# "unavailable" long after connectivity is restored.
+#
+# Auto-remediation: call testall + trigger an RSS sync. Both are harmless,
+# idempotent API calls (no restart/recreate), safe to retry every cycle.
+declare -A ARR_APPS=(
+  [sonarr]="8989"
+  [radarr]="7878"
+)
+
+is_indexer_backoff() {
+  echo "$1" | grep -qiE "unavailable due to (failures|recent indexer errors)"
+}
+
+for app in "${!ARR_APPS[@]}"; do
+  port="${ARR_APPS[$app]}"
+  indexer_state_file="$STATE_DIR/${app}_indexers"
+  prev_indexer_ok="true"
+  if [[ -f "$indexer_state_file" ]]; then
+    prev_indexer_ok=$(cat "$indexer_state_file")
+  fi
+
+  indexer_ok="true"
+  indexer_auto_healed="false"
+  if docker ps --format "{{.Names}}" 2>/dev/null | grep -qx "$app"; then
+    api_key=$(docker exec "$app" cat /config/config.xml 2>/dev/null | grep -oP '(?<=<ApiKey>)[^<]+' || true)
+    if [[ -n "$api_key" ]]; then
+      health=$(timeout 5 docker exec "$app" curl -s -H "X-Api-Key: $api_key" "http://localhost:${port}/api/v3/health" 2>/dev/null || true)
+      if is_indexer_backoff "$health"; then
+        timeout 10 docker exec "$app" curl -s -X POST -H "X-Api-Key: $api_key" -H "Content-Type: application/json" \
+          "http://localhost:${port}/api/v3/indexer/testall" >/dev/null 2>&1 || true
+        timeout 10 docker exec "$app" curl -s -X POST -H "X-Api-Key: $api_key" -H "Content-Type: application/json" \
+          -d '{"name":"RssSync"}' "http://localhost:${port}/api/v3/command" >/dev/null 2>&1 || true
+        sleep 3
+        health=$(timeout 5 docker exec "$app" curl -s -H "X-Api-Key: $api_key" "http://localhost:${port}/api/v3/health" 2>/dev/null || true)
+        if is_indexer_backoff "$health"; then
+          indexer_ok="false"
+        else
+          indexer_auto_healed="true"
+        fi
+      fi
+    fi
+  fi
+
+  if [[ "$indexer_auto_healed" == "true" ]]; then
+    alerts_healed+=("**$app** — indexers were stuck unavailable; ran testall + RSS sync and they recovered")
+  fi
+
+  if [[ "$indexer_ok" == "false" && "$prev_indexer_ok" == "true" ]]; then
+    alerts_down+=("**$app** — indexers stuck unavailable (auto-remediation attempted, did not clear it)")
+    echo "false" > "$indexer_state_file"
+  elif [[ "$indexer_ok" == "true" && "$prev_indexer_ok" == "false" && "$indexer_auto_healed" == "false" ]]; then
+    alerts_recovered+=("**$app** — indexers available again")
+    echo "true" > "$indexer_state_file"
+  else
+    echo "$indexer_ok" > "$indexer_state_file"
+  fi
+done
+
 # Send notifications
 if [[ ${#alerts_down[@]} -gt 0 ]] || [[ ${#unhealthy_containers[@]} -gt 0 ]]; then
   all_alerts=("${alerts_down[@]:-}" "${unhealthy_containers[@]:-}")
@@ -123,6 +258,11 @@ fi
 if [[ ${#alerts_recovered[@]} -gt 0 ]]; then
   body=$(printf '%s\n' "${alerts_recovered[@]}" | paste -sd'\n' -)
   send_discord 65280 "✅ TV Stack — Container Recovered" "$body"
+fi
+
+if [[ ${#alerts_healed[@]} -gt 0 ]]; then
+  body=$(printf '%s\n' "${alerts_healed[@]}" | paste -sd'\n' -)
+  send_discord 3447003 "🔧 TV Stack — Auto-Remediated" "$body"
 fi
 
 # Daily summary — fires once per day (around midnight) regardless of state changes

@@ -315,6 +315,9 @@ docker compose up -d --build discord-bot
 - **Container down** — immediate red alert with container name and status
 - **Container recovered** — green alert when it comes back up
 - **Daily summary** — midnight digest of all container states, green if all healthy, yellow if anything is down
+- **Gluetun DNS check** — catches the case where Docker reports gluetun "healthy" but its internal DNS resolver is broken (silent VPN failure mode — the tunnel is up but nothing behind it can resolve hostnames). Auto-remediates: `docker restart gluetun`, then restarts prowlarr/qbittorrent/flaresolverr to rejoin its network namespace (restarting gluetun alone gives it a new namespace and silently orphans those three). Capped to one restart attempt per 15 minutes to avoid a restart loop on a genuinely broken VPN. Only alerts if the restart doesn't clear it — at that point use the heavier `docker compose down gluetun && rm -rf gluetun/` reset from CLAUDE.md
+- **Sonarr/Radarr indexer backoff check** — catches indexers stuck in a long-term failure backoff (`IndexerLongTermStatusCheck`) after connectivity issues. This state persists in the app's database and survives a plain container restart. Auto-remediates by calling `POST /api/v3/indexer/testall` plus an RSS sync (both harmless, idempotent API calls) and only alerts if the backoff is still stuck afterward
+- **Auto-remediated notice** — a separate blue Discord alert fires whenever one of the above self-heals, so you know it happened even though nothing needed your attention
 
 **Setup (one time):**
 
