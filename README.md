@@ -30,6 +30,8 @@ A self-hosted, fully automated media stack. You request something — it finds, 
 
 **Media integrity** — `media-check` runs nightly via ffprobe to detect corrupted files and wrong audio/subtitle tracks, alerting to Discord on issues.
 
+**Automatic import repair** — `sonarr-import-resolver` detects episodes that Sonarr downloaded but couldn't auto-import (common with older shows where the release group's S/E numbering differs from TVDB). It uses Claude to match the episode title in the filename against the full series episode list and imports automatically when confidence is high (≥ 0.85 by default), or posts a Discord notification with the proposed match for manual review when it isn't sure.
+
 **Automatic updates** — Watchtower checks for new Docker image versions weekly (Monday 4am) and restarts containers with updates. Notifies Discord on any changes.
 
 ## Services
@@ -50,6 +52,7 @@ A self-hosted, fully automated media stack. You request something — it finds, 
 | Tailscale | — | Remote access VPN |
 | Watchtower | — | Automatic image updater |
 | media-check | — | Nightly corruption & language scanner |
+| sonarr-import-resolver | — | Claude-powered stuck import fixer |
 
 > **Plex** runs as a Windows service (not in Docker). Add it to your Tailscale network separately.
 
@@ -99,6 +102,7 @@ Fill in:
 - **`DISCORD_WEBHOOK`** — webhook URL for health alerts and media-check notifications (Discord → channel → Integrations → Webhooks → New Webhook → Copy URL). Format: `https://discord.com/api/webhooks/CHANNEL_ID/TOKEN`
 - **`WATCHTOWER_NOTIFICATION_URL`** — same webhook in Shoutrrr format for Watchtower: `discord://TOKEN@CHANNEL_ID` (token and channel ID from your webhook URL, just swapped)
 - **`RADARR_API_KEY`** — Radarr → Settings → General → API Key (fill in after Radarr is running; used by media-check)
+- **`ANTHROPIC_API_KEY`** — API key for Claude (used by sonarr-import-resolver). Get one at [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys)
 
 ### 2. Create media folders
 
@@ -316,7 +320,7 @@ docker compose up -d --build discord-bot
 - **Container recovered** — green alert when it comes back up
 - **Daily summary** — midnight digest of all container states, green if all healthy, yellow if anything is down
 - **Gluetun DNS check** — catches the case where Docker reports gluetun "healthy" but its internal DNS resolver is broken (silent VPN failure mode — the tunnel is up but nothing behind it can resolve hostnames). Auto-remediates: `docker restart gluetun`, then restarts prowlarr/qbittorrent/flaresolverr to rejoin its network namespace (restarting gluetun alone gives it a new namespace and silently orphans those three). Capped to one restart attempt per 15 minutes to avoid a restart loop on a genuinely broken VPN. Only alerts if the restart doesn't clear it — at that point use the heavier `docker compose down gluetun && rm -rf gluetun/` reset from CLAUDE.md
-- **Sonarr/Radarr indexer backoff check** — catches indexers stuck in a long-term failure backoff (`IndexerLongTermStatusCheck`) after connectivity issues. This state persists in the app's database and survives a plain container restart. Auto-remediates by calling `POST /api/v3/indexer/testall` plus an RSS sync (both harmless, idempotent API calls) and only alerts if the backoff is still stuck afterward
+- **Sonarr/Radarr indexer backoff check** — catches indexers stuck in a long-term failure backoff (`IndexerLongTermStatusCheck`) after connectivity issues. This state persists in the app's database and survives a plain container restart. Auto-remediates by calling `POST /api/v3/indexer/testall` plus an RSS sync. If still stuck, alerts with per-indexer detail ("2 of 5 indexers down: `MyIndexer`") and pulls recent error lines from Prowlarr's log for each failing indexer so you have context without manually digging through logs
 - **Auto-remediated notice** — a separate blue Discord alert fires whenever one of the above self-heals, so you know it happened even though nothing needed your attention
 
 **Setup (one time):**
@@ -335,6 +339,44 @@ bash health-monitor.sh
 State is tracked in `/tmp/docker-health-state/` between runs. Alerts only fire on transitions (no repeated spam). Logs go to `/tmp/docker-health-monitor.log`.
 
 > Requires `DISCORD_WEBHOOK` to be set in `.env`.
+
+---
+
+## Sonarr Import Resolver
+
+`sonarr-import-resolver` runs every 15 minutes and fixes a specific failure mode: episodes that Sonarr grabbed but can't auto-import because the release group's S/E numbering doesn't match TVDB. This is common with older or obscure shows (classic cartoons, foreign series, anything with a messy TVDB history).
+
+**How it works:**
+
+1. Polls Sonarr's queue for items with "Automatic import is not possible — release matched to series by ID"
+2. Fetches Sonarr's manual import candidates for the file (Sonarr usually knows the series, just not which episode)
+3. Calls Claude Haiku with the filename + the full episode list for that series
+4. Claude extracts the episode title from the filename (e.g. `South.Pole.Vault` → "South Pole Vault") and matches it against the list
+5. Acts on the result based on confidence:
+
+| Confidence | Action |
+|------------|--------|
+| ≥ 0.85 (threshold) | Auto-imports; posts Discord confirmation |
+| 0.50 – 0.85 | Discord notification with proposed match — import manually if correct |
+| < 0.50 | Discord notification that it couldn't resolve |
+
+State is tracked in `sonarr-import-resolver/data/import-resolver.db` to avoid re-processing the same download within 24 hours.
+
+**Tuning via `.env`:**
+
+```bash
+IMPORT_CONFIDENCE_THRESHOLD=0.85   # raise to be more conservative, lower to auto-import more
+IMPORT_CLAUDE_MODEL=claude-haiku-4-5-20251001
+IMPORT_RETRY_HOURS=24
+```
+
+**Manual trigger:**
+
+```bash
+docker exec sonarr-import-resolver python resolve.py
+```
+
+> Requires `ANTHROPIC_API_KEY` in `.env`. Cost is negligible — Haiku processes a typical episode list for under a cent per call.
 
 ---
 
