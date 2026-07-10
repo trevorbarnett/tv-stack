@@ -8,6 +8,10 @@ CLAUDE.md
 # Homepage config (contains API keys after setup)
 homepage/
 
+# Runtime data directories (SQLite state)
+media-check/data/
+sonarr-import-resolver/data/
+
 # Container config directories (generated at runtime)
 gluetun/
 qbittorrent/

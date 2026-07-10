@@ -1,0 +1,1 @@
+*/15 * * * * cd /app && python resolve.py 2>&1

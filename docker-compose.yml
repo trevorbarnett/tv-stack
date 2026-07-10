@@ -328,6 +328,25 @@ services:
         ipv4_address: ${IP_MEDIA_CHECK}
     restart: unless-stopped
 
+  sonarr-import-resolver:
+    build: ./sonarr-import-resolver
+    container_name: sonarr-import-resolver
+    environment:
+      - SONARR_URL=http://172.39.0.4:8989
+      - SONARR_API_KEY=${SONARR_API_KEY}
+      - DISCORD_WEBHOOK=${DISCORD_WEBHOOK}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - CONFIDENCE_THRESHOLD=${IMPORT_CONFIDENCE_THRESHOLD:-0.85}
+      - CLAUDE_MODEL=${IMPORT_CLAUDE_MODEL:-claude-haiku-4-5-20251001}
+      - RETRY_HOURS=${IMPORT_RETRY_HOURS:-24}
+      - TZ=${TZ}
+    volumes:
+      - ./sonarr-import-resolver/data:/app/data
+    networks:
+      tvnetwork:
+        ipv4_address: ${IP_SONARR_IMPORT_RESOLVER}
+    restart: unless-stopped
+
   # ============================================================
   # PLEX PROXY — Stable socat bridge for Tautulli → Plex
   # WSL2 assigns a new IP to the Windows host on every reboot, so a hardcoded

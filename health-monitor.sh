@@ -194,38 +194,97 @@ fi
 #
 # Auto-remediation: call testall + trigger an RSS sync. Both are harmless,
 # idempotent API calls (no restart/recreate), safe to retry every cycle.
+# Reports per-indexer granularity and pulls Prowlarr log context on failure.
 declare -A ARR_APPS=(
   [sonarr]="8989"
   [radarr]="7878"
 )
 
-is_indexer_backoff() {
-  echo "$1" | grep -qiE "unavailable due to (failures|recent indexer errors)"
+# Extract names of down indexers from /api/v3/health JSON on stdin.
+# Messages look like: "Indexer {name} is unavailable due to failures..."
+parse_down_indexers() {
+  python3 -c "
+import sys, json, re
+try:
+    for item in json.load(sys.stdin):
+        if item.get('source','') in ('IndexerLongTermStatusCheck','IndexerStatusCheck'):
+            m = re.match(r'Indexer (.+?) is unavailable', item.get('message',''))
+            if m: print(m.group(1))
+except: pass
+" 2>/dev/null
+}
+
+# Count total configured indexers via /api/v3/indexer.
+count_indexers() {
+  local app="$1" port="$2" key="$3"
+  timeout 5 docker exec "$app" curl -s -H "X-Api-Key: $key" \
+    "http://localhost:${port}/api/v3/indexer" 2>/dev/null \
+    | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "?"
+}
+
+# Grep Prowlarr's current log for recent error lines mentioning a given indexer.
+prowlarr_errors_for() {
+  local name="$1"
+  # Strip characters that would break the grep pattern inside the docker exec
+  local safe_name
+  safe_name=$(printf '%s' "$name" | tr -d "'\"\\\\" | cut -c1-60)
+  docker exec prowlarr bash -c \
+    "log=\$(find /config/logs -name '*.txt' 2>/dev/null | sort -r | head -1); \
+     [[ -n \"\$log\" ]] && grep -i '$safe_name' \"\$log\" 2>/dev/null \
+       | grep -iE 'error|fail|warn' | tail -3" \
+    2>/dev/null || true
 }
 
 for app in "${!ARR_APPS[@]}"; do
   port="${ARR_APPS[$app]}"
   indexer_state_file="$STATE_DIR/${app}_indexers"
   prev_indexer_ok="true"
-  if [[ -f "$indexer_state_file" ]]; then
-    prev_indexer_ok=$(cat "$indexer_state_file")
-  fi
+  [[ -f "$indexer_state_file" ]] && prev_indexer_ok=$(cat "$indexer_state_file")
 
   indexer_ok="true"
   indexer_auto_healed="false"
+  indexer_alert_detail=""
+
   if docker ps --format "{{.Names}}" 2>/dev/null | grep -qx "$app"; then
     api_key=$(docker exec "$app" cat /config/config.xml 2>/dev/null | grep -oP '(?<=<ApiKey>)[^<]+' || true)
     if [[ -n "$api_key" ]]; then
-      health=$(timeout 5 docker exec "$app" curl -s -H "X-Api-Key: $api_key" "http://localhost:${port}/api/v3/health" 2>/dev/null || true)
-      if is_indexer_backoff "$health"; then
+      health=$(timeout 5 docker exec "$app" curl -s -H "X-Api-Key: $api_key" \
+        "http://localhost:${port}/api/v3/health" 2>/dev/null || echo "[]")
+
+      mapfile -t down_before < <(parse_down_indexers <<< "$health")
+
+      if [[ ${#down_before[@]} -gt 0 ]]; then
+        total=$(count_indexers "$app" "$port" "$api_key")
+
+        # Auto-remediation
         timeout 10 docker exec "$app" curl -s -X POST -H "X-Api-Key: $api_key" -H "Content-Type: application/json" \
           "http://localhost:${port}/api/v3/indexer/testall" >/dev/null 2>&1 || true
         timeout 10 docker exec "$app" curl -s -X POST -H "X-Api-Key: $api_key" -H "Content-Type: application/json" \
           -d '{"name":"RssSync"}' "http://localhost:${port}/api/v3/command" >/dev/null 2>&1 || true
         sleep 3
-        health=$(timeout 5 docker exec "$app" curl -s -H "X-Api-Key: $api_key" "http://localhost:${port}/api/v3/health" 2>/dev/null || true)
-        if is_indexer_backoff "$health"; then
+
+        health2=$(timeout 5 docker exec "$app" curl -s -H "X-Api-Key: $api_key" \
+          "http://localhost:${port}/api/v3/health" 2>/dev/null || echo "[]")
+        mapfile -t down_after < <(parse_down_indexers <<< "$health2")
+
+        if [[ ${#down_after[@]} -gt 0 ]]; then
           indexer_ok="false"
+
+          # Build summary: "2 of 5 indexers down: `Name1`, `Name2`"
+          down_names=$(printf '`%s`' "${down_after[@]}" | paste -sd ', ')
+          indexer_alert_detail="${#down_after[@]} of ${total} indexers down: ${down_names}"
+          healed_count=$(( ${#down_before[@]} - ${#down_after[@]} ))
+          [[ $healed_count -gt 0 ]] && indexer_alert_detail+="; ${healed_count} recovered after testall"
+
+          # Pull Prowlarr log context for each still-failing indexer
+          if docker ps --format "{{.Names}}" 2>/dev/null | grep -qx "prowlarr"; then
+            for idx in "${down_after[@]}"; do
+              snippet=$(prowlarr_errors_for "$idx")
+              if [[ -n "$snippet" ]]; then
+                indexer_alert_detail+="\n**${idx}** (Prowlarr log):\n\`\`\`\n${snippet}\n\`\`\`"
+              fi
+            done
+          fi
         else
           indexer_auto_healed="true"
         fi
@@ -238,7 +297,7 @@ for app in "${!ARR_APPS[@]}"; do
   fi
 
   if [[ "$indexer_ok" == "false" && "$prev_indexer_ok" == "true" ]]; then
-    alerts_down+=("**$app** — indexers stuck unavailable (auto-remediation attempted, did not clear it)")
+    alerts_down+=("**$app** — ${indexer_alert_detail:-indexers stuck unavailable} (auto-remediation attempted, did not clear it)")
     echo "false" > "$indexer_state_file"
   elif [[ "$indexer_ok" == "true" && "$prev_indexer_ok" == "false" && "$indexer_auto_healed" == "false" ]]; then
     alerts_recovered+=("**$app** — indexers available again")
@@ -247,6 +306,77 @@ for app in "${!ARR_APPS[@]}"; do
     echo "$indexer_ok" > "$indexer_state_file"
   fi
 done
+
+# dlcache mount check — Samsung SSD 850 EVO 1TB passed through as raw ext4.
+# Detaches when Windows reboots or WSL shuts down. Two-stage auto-remediation:
+# 1) try a direct mount (handles wsl --shutdown where disk is still attached at
+#    Windows level but the Linux mount is gone); 2) if that fails, fire the
+# MountDLCache Windows scheduled task to reattach the raw disk, then mount.
+# 15-minute cooldown prevents restart-looping if the disk is physically gone.
+dlcache_state_file="$STATE_DIR/dlcache_mount"
+dlcache_cooldown_file="$STATE_DIR/dlcache_mount_restart_at"
+prev_dlcache_ok="true"
+[[ -f "$dlcache_state_file" ]] && prev_dlcache_ok=$(cat "$dlcache_state_file")
+
+check_dlcache() {
+  mountpoint -q /mnt/dlcache 2>/dev/null
+}
+
+dlcache_ok="false"
+dlcache_auto_healed="false"
+
+if check_dlcache; then
+  dlcache_ok="true"
+else
+  last_dlcache_attempt=0
+  [[ -f "$dlcache_cooldown_file" ]] && last_dlcache_attempt=$(cat "$dlcache_cooldown_file")
+  now=$(date +%s)
+  if (( now - last_dlcache_attempt > 900 )); then
+    echo "$now" > "$dlcache_cooldown_file"
+
+    # Stage 1: disk still attached at Windows level, just unmounted
+    sudo /usr/bin/mount /mnt/dlcache 2>/dev/null || true
+    if check_dlcache; then
+      dlcache_ok="true"
+      dlcache_auto_healed="true"
+    else
+      # Stage 2: disk fully detached — fire MountDLCache Windows task to reattach
+      /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe \
+        -NonInteractive \
+        -Command "Start-ScheduledTask -TaskName MountDLCache; Start-Sleep 5" \
+        2>/dev/null || true
+      for _ in $(seq 1 6); do
+        sleep 5
+        sudo /usr/bin/mount /mnt/dlcache 2>/dev/null && break || true
+      done
+      if check_dlcache; then
+        dlcache_ok="true"
+        dlcache_auto_healed="true"
+      fi
+    fi
+
+    # Restart containers that bind-mount dlcache — Docker's rprivate propagation
+    # means they captured the bare mountpoint at start and won't see the ext4
+    # until restarted.
+    if [[ "$dlcache_ok" == "true" ]]; then
+      docker restart sabnzbd qbittorrent >/dev/null 2>&1 || true
+    fi
+  fi
+fi
+
+if [[ "$dlcache_auto_healed" == "true" ]]; then
+  alerts_healed+=("**dlcache** — \`/mnt/dlcache\` was unmounted; auto-reattached, mounted, and restarted sabnzbd + qbittorrent")
+fi
+
+if [[ "$dlcache_ok" == "false" && "$prev_dlcache_ok" == "true" ]]; then
+  alerts_down+=("**dlcache** — \`/mnt/dlcache\` not mounted (remediation attempted; check \`Get-Disk\` in PowerShell to confirm PHYSICALDRIVE3 is visible)")
+  echo "false" > "$dlcache_state_file"
+elif [[ "$dlcache_ok" == "true" && "$prev_dlcache_ok" == "false" && "$dlcache_auto_healed" == "false" ]]; then
+  alerts_recovered+=("**dlcache** — \`/mnt/dlcache\` is mounted again")
+  echo "true" > "$dlcache_state_file"
+else
+  echo "$dlcache_ok" > "$dlcache_state_file"
+fi
 
 # Send notifications
 if [[ ${#alerts_down[@]} -gt 0 ]] || [[ ${#unhealthy_containers[@]} -gt 0 ]]; then
