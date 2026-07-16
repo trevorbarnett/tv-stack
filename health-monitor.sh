@@ -378,6 +378,103 @@ else
   echo "$dlcache_ok" > "$dlcache_state_file"
 fi
 
+# Plex remote-access check — Plex runs as a native Windows service (not
+# Docker), so it's reached from the WSL2 host via the Windows host IP seen
+# in the default route (same trick plex-proxy/start.sh uses, since this
+# script runs directly on the WSL2 host, not in a container).
+#
+# Two things are checked: (1) basic reachability via /identity (no auth),
+# which catches the Windows service being down/hung; (2) myPlexMappingState
+# from the authenticated root endpoint, which is the field Plex's own
+# Settings > Remote Access page reads — it can flip to failed/unknown/waiting
+# even while Plex is running fine locally (e.g. router UPnP re-mapped the
+# external port).
+#
+# Auto-remediation: toggle PublishServerOnPlexOnlineKey off then back on via
+# the prefs API. This is the same action as unchecking/rechecking "Enable
+# Remote Access" in Settings — it forces Plex to drop and redo its UPnP/
+# NAT-PMP mapping negotiation, without restarting the Windows service or
+# interrupting local/in-progress streams. 15-minute cooldown, same as the
+# gluetun DNS remediation, so a persistently broken mapping (e.g. genuine
+# router/CGNAT issue) doesn't retry-loop forever.
+plex_reachable_state_file="$STATE_DIR/plex_reachable"
+plex_mapping_state_file="$STATE_DIR/plex_remote_access"
+plex_remediation_cooldown_file="$STATE_DIR/plex_remediation_at"
+prev_plex_reachable="true"
+[[ -f "$plex_reachable_state_file" ]] && prev_plex_reachable=$(cat "$plex_reachable_state_file")
+prev_plex_mapping_ok="true"
+[[ -f "$plex_mapping_state_file" ]] && prev_plex_mapping_ok=$(cat "$plex_mapping_state_file")
+
+PLEX_TOKEN=""
+if [[ -f "$COMPOSE_DIR/.env" ]]; then
+  PLEX_TOKEN=$(grep "^PLEX_TOKEN=" "$COMPOSE_DIR/.env" | cut -d= -f2- | tr -d '[:space:]')
+fi
+
+plex_host=$(ip route show default 2>/dev/null | awk '{print $3; exit}')
+plex_reachable="false"
+plex_mapping_ok="true"  # only meaningful when plex_reachable=true
+plex_mapping_state=""
+
+if [[ -n "$plex_host" ]] && timeout 5 curl -s -f "http://${plex_host}:32400/identity" >/dev/null 2>&1; then
+  plex_reachable="true"
+  if [[ -n "$PLEX_TOKEN" ]]; then
+    plex_mapping_state=$(timeout 5 curl -s "http://${plex_host}:32400/?X-Plex-Token=${PLEX_TOKEN}" 2>/dev/null \
+      | grep -oP '(?<=myPlexMappingState=")[^"]+' || true)
+    if [[ -n "$plex_mapping_state" && "$plex_mapping_state" != "mapped" ]]; then
+      plex_mapping_ok="false"
+    fi
+  fi
+fi
+
+plex_auto_healed="false"
+if [[ "$plex_reachable" == "true" && "$plex_mapping_ok" == "false" && -n "$PLEX_TOKEN" ]]; then
+  last_plex_remediation=0
+  [[ -f "$plex_remediation_cooldown_file" ]] && last_plex_remediation=$(cat "$plex_remediation_cooldown_file")
+  now=$(date +%s)
+  if (( now - last_plex_remediation > 900 )); then
+    echo "$now" > "$plex_remediation_cooldown_file"
+    timeout 10 curl -s -X PUT \
+      "http://${plex_host}:32400/:/prefs?X-Plex-Token=${PLEX_TOKEN}&PublishServerOnPlexOnlineKey=0" >/dev/null 2>&1 || true
+    sleep 3
+    timeout 10 curl -s -X PUT \
+      "http://${plex_host}:32400/:/prefs?X-Plex-Token=${PLEX_TOKEN}&PublishServerOnPlexOnlineKey=1" >/dev/null 2>&1 || true
+    sleep 10  # give Plex time to renegotiate the mapping before re-checking
+
+    plex_mapping_state=$(timeout 5 curl -s "http://${plex_host}:32400/?X-Plex-Token=${PLEX_TOKEN}" 2>/dev/null \
+      | grep -oP '(?<=myPlexMappingState=")[^"]+' || true)
+    if [[ "$plex_mapping_state" == "mapped" ]]; then
+      plex_mapping_ok="true"
+      plex_auto_healed="true"
+    fi
+  fi
+fi
+
+if [[ "$plex_auto_healed" == "true" ]]; then
+  alerts_healed+=("**plex** — remote access mapping was stuck (\`${plex_mapping_state}\`); toggled remote access off/on and it recovered (\`mapped\`)")
+fi
+
+if [[ "$plex_reachable" == "false" && "$prev_plex_reachable" == "true" ]]; then
+  alerts_down+=("**plex** — not responding at ${plex_host:-unknown}:32400 (Windows service down or unreachable from WSL2)")
+  echo "false" > "$plex_reachable_state_file"
+elif [[ "$plex_reachable" == "true" && "$prev_plex_reachable" == "false" ]]; then
+  alerts_recovered+=("**plex** — responding again at ${plex_host}:32400")
+  echo "true" > "$plex_reachable_state_file"
+else
+  echo "$plex_reachable" > "$plex_reachable_state_file"
+fi
+
+if [[ "$plex_reachable" == "true" ]]; then
+  if [[ "$plex_mapping_ok" == "false" && "$prev_plex_mapping_ok" == "true" ]]; then
+    alerts_down+=("**plex** — remote access mapping state is \`${plex_mapping_state}\` (not \`mapped\`; auto-remediation attempted) — check router UPnP/port-forward, or hit Retry in Plex Settings → Remote Access")
+    echo "false" > "$plex_mapping_state_file"
+  elif [[ "$plex_mapping_ok" == "true" && "$prev_plex_mapping_ok" == "false" && "$plex_auto_healed" == "false" ]]; then
+    alerts_recovered+=("**plex** — remote access mapping restored (\`mapped\`)")
+    echo "true" > "$plex_mapping_state_file"
+  else
+    echo "$plex_mapping_ok" > "$plex_mapping_state_file"
+  fi
+fi
+
 # Send notifications
 if [[ ${#alerts_down[@]} -gt 0 ]] || [[ ${#unhealthy_containers[@]} -gt 0 ]]; then
   all_alerts=("${alerts_down[@]:-}" "${unhealthy_containers[@]:-}")
@@ -412,6 +509,16 @@ if [[ "$last_summary" != "$today" ]]; then
       down_list+=("❌ $svc — \`$current\`")
     fi
   done
+
+  if [[ "$plex_reachable" == "true" ]]; then
+    if [[ "$plex_mapping_ok" == "true" ]]; then
+      up_list+=("✅ plex (remote access: mapped)")
+    else
+      down_list+=("❌ plex — remote access: \`${plex_mapping_state}\`")
+    fi
+  else
+    down_list+=("❌ plex — unreachable at ${plex_host:-unknown}:32400")
+  fi
 
   all_lines=("${down_list[@]:-}" "${up_list[@]:-}")
   body=$(printf '%s\n' "${all_lines[@]}" | paste -sd'\n' -)
